@@ -1,0 +1,7 @@
+chainlit==2.9.0
+langchain==1.0.7
+langchain_community==0.4.1
+langchain_core==1.0.5
+langchain_openai==1.0.3
+python-dotenv==1.2.1
+Requests==2.32.5
