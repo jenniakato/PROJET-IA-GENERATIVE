@@ -1,273 +1,291 @@
 #!/usr/bin/env python
 """
-RAG3_langchain.py
-────────────────────────────
-Retrieval-Augmented-Generation with full LangChain integration:
+RAG.py
+─────────────────────────────
+RAG avec LCEL et agents spécialisés avec routage intelligent
 
- • RecursiveCharacterTextSplitter (LangChain)
- • PDF + TXT ingestion (LangChain loaders)
- • FAISS vector search (LangChain wrapper)
- • OpenAI embeddings + chat (LangChain)
- • Chat history with InMemoryChatMessageHistory
- • Smart greeting detection
-
-Dependencies
-------------
-pip install langchain langchain-openai langchain-community faiss-cpu pypdf tqdm python-dotenv
+Capacités:
+▪️ RAG sur documents internes (PRIORITÉ ABSOLUE si sujets internes)
+▪️ Calculatrice pour calculs mathématiques
+▪️ Recherche web DuckDuckGo (externe uniquement)
+▪️ Jours de tension RTE (Tempo)
+▪️ Conversation simple sans outils
 """
-from __future__ import annotations
+
+from pathlib import Path
 import os
 import textwrap
-from pathlib import Path
 import re
+from typing import Dict, Any
+from datetime import datetime
 
-from langchain_community.document_loaders import TextLoader, PyPDFLoader
-from langchain_text_splitters import RecursiveCharacterTextSplitter
+# ── LangChain core avec LCEL ─────────────────────────────────────────
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_community.document_loaders import TextLoader, PyPDFLoader
 from langchain_community.vectorstores import FAISS
-from langchain_core.chat_history import InMemoryChatMessageHistory
-from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough
+from langchain_core.messages import HumanMessage, AIMessage
+from langchain_core.chat_history import InMemoryChatMessageHistory
+from langchain_core.tools import Tool
+from langchain_community.tools import DuckDuckGoSearchRun
+from langchain_community.utilities import DuckDuckGoSearchAPIWrapper
+
+# ── Agent RTE personnalisé ────────────────────────
+from jourdetension import JourDeTensionRTE, format_reponse_rte
 from dotenv import load_dotenv
-from tqdm.auto import tqdm
 
-# ─────────────────────────── Configuration ──────────────────────────────
 load_dotenv()
-OPENAI_API_KEY = os.getenv("openai_key") 
+os.environ["OPENAI_API_KEY"] = os.getenv("openai_key", "")
 
-DOCS_DIR = Path("C:\\Users\\j_aka\\Desktop\\Projet IA GENERATIVE\\Data")
+# ═════════════════════════════════════════════════════
+#                          CONFIGURATION
+# ═════════════════════════════════════════════════════
+
+DOCS_DIR = Path("C:\\Users\\j_aka\\Desktop\\AII\\Data")
 EMBED_MODEL = "text-embedding-3-small"
 CHAT_MODEL = "gpt-4o-mini"
 CHUNK_SIZE = 1000
 CHUNK_OVERLAP = 200
-TOP_K = 4
-PERSIST_PATH = "faiss_store_langchain"
+PERSIST_PATH = "faiss_store"
+TOP_K_DOCUMENTS = 10
 
-# ✅ Prompt amélioré qui permet les salutations
-SYSTEM_PROMPT = (
-    "You are a precise, concise tutor. "
-    "For greetings and casual conversation, respond naturally and warmly. "
-    "For knowledge questions, answer ONLY from the provided context. "
-    "If the context doesn't contain the answer to a knowledge question, say 'I don't know.'"
-)
+SYSTEM_PROMPT_RAG = """Tu es un expert et tuteur précis spécialisé dans RTE (Réseau de Transport d'Électricité).
 
-# ─────────────────────────── Vérification de la clé API ──────────────────
-assert OPENAI_API_KEY, "👉 Please set OPENAI_API_KEY (or openai_key) in your .env file first!"
-os.environ["OPENAI_API_KEY"] = OPENAI_API_KEY
+RÈGLES STRICTES:
+1. Base ta réponse EXCLUSIVEMENT sur le contexte fourni ci-dessous
+2. Si tu trouves les informations pertinentes, synthétise une réponse claire et complète en français
+3. Si le contexte est insuffisant, réponds: "Je n'ai pas trouvé cette information dans les documents fournis."
+4. Cite les sources quand c'est pertinent
+5. Sois concis mais complet
 
-# ─────────────────────────── Détection des salutations ───────────────────
-def is_greeting_or_casual(text: str) -> bool:
-    "Détecte si le message est une salutation ou conversation casual."
-    text_lower = text.lower().strip()
-    
-    # Liste de patterns pour salutations et conversations casual
-    greeting_patterns = [
-        r'\b(bonjour|salut|hello|hi|hey|coucou|bonsoir)\b',
-        r'\b(ça va|comment ça va|comment vas-tu|how are you)\b',
-        r'\b(merci|thank you|thanks)\b',
-        r'\b(au revoir|bye|goodbye|à bientôt)\b',
-        r'^(oui|non|ok|d\'accord|yes|no)$',
-    ]
-    
-    for pattern in greeting_patterns:
-        if re.search(pattern, text_lower):
-            return True
-    
-    # Si la question est très courte (moins de 3 mots), probablement casual
-    if len(text_lower.split()) <= 3 and '?' not in text_lower:
-        return True
-    
-    return False
+Contexte:
+{context}
 
-# ─────────────────────────── 1. Chargement et division des documents ─────
-def load_and_split_documents() -> list:
-    """Loads and splits documents from DOCS_DIR using LangChain loaders."""
-    print(f"Scanning directory: {DOCS_DIR}")
-    
+Historique de conversation:
+{chat_history}
+
+Question actuelle: {question}"""
+
+SYSTEM_PROMPT_ROUTER = """Tu es un assistant intelligent spécialisé dans les règles et systèmes RTE.
+
+RÈGLE ABSOLUE: Une fois qu'un outil a renvoyé un résultat, tu DOIS l'utiliser pour formuler ta réponse. 
+Ne dis JAMAIS "Je n'ai pas pu obtenir..." si un outil t'a fourni des données.
+
+RÈGLES DE ROUTAGE:
+1. calculator: UNIQUEMENT pour calculs mathématiques explicites
+2. rte_tension: UNIQUEMENT pour les jours Tempo (Rouge/Blanc/Bleu)
+3. web_search: UNIQUEMENT pour informations externes NON liées à RTE
+   → Exemples: météo, actualités, prix spot, CEE, heure actuelle
+
+Choisis l'outil le plus pertinent pour la requête utilisateur."""
+
+# ═════════════════════════════════════════════════════
+#                          OUTILS / AGENTS
+# ═════════════════════════════════════════════════════
+
+def calculatrice(expression: str) -> str:
+    try:
+        expression = expression.strip().replace(',', '.')
+        if not re.match(r'^[\d\s\+\-\*\/\(\)\.]+$', expression):
+            return "❌ Expression invalide. Utilisez uniquement des nombres et opérateurs (+, -, *, /, ())"
+        resultat = eval(expression, {"__builtins__": {}}, {})
+        return f"✓ Résultat: {resultat}"
+    except Exception as e:
+        return f"❌ Erreur de calcul: {str(e)}"
+
+def creer_outil_web_search():
+    wrapper = DuckDuckGoSearchAPIWrapper(max_results=3)
+    search = DuckDuckGoSearchRun(api_wrapper=wrapper)
+    async def run_search_async(query: str) -> str:
+        import asyncio
+        return await asyncio.to_thread(search.run, query)
+    return Tool.from_function(
+        name="web_search",
+        description=(
+            "Recherche web pour informations EXTERNES non liées à RTE. "
+            "Ex: météo, heure, actualités, prix spot, CEE."
+        ),
+        func=run_search_async,
+        coroutine=run_search_async
+    )
+
+def creer_outil_rte():
+    agent_rte = JourDeTensionRTE()
+    async def run_rte_async(query: str) -> str:
+        import asyncio
+        from datetime import timedelta
+        query_lower = query.lower()
+        def get_rte_data():
+            if any(word in query_lower for word in ["semaine", "prochains jours", "prévision", "7 jours"]):
+                return agent_rte.get_prevision_semaine()
+            elif "demain" in query_lower:
+                from datetime import datetime
+                date_demain = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+                return agent_rte.get_jour_tension(date_demain)
+            else:
+                return agent_rte.get_jour_tension()
+        data = await asyncio.to_thread(get_rte_data)
+        return format_reponse_rte(data)
+    return Tool.from_function(
+        name="rte_tension",
+        description="Calendrier Tempo EDF (jours Rouge/Blanc/Bleu).",
+        func=run_rte_async,
+        coroutine=run_rte_async
+    )
+
+# ═════════════════════════════════════════════════════
+#                     RAG avec LCEL
+# ═════════════════════════════════════════════════════
+
+def load_documents():
     loaders = []
-    
-    # Collect all TXT files
     for path in DOCS_DIR.rglob("*.txt"):
-        loaders.append(TextLoader(str(path), encoding="utf-8"))
-    
-    # Collect all PDF files
+        loaders.append(TextLoader(str(path), encoding='utf-8'))
     for path in DOCS_DIR.rglob("*.pdf"):
         loaders.append(PyPDFLoader(str(path)))
-    
-    if not loaders:
-        raise RuntimeError(f"No .txt or .pdf files found inside {DOCS_DIR.absolute()}")
-    
-    # Load all documents
     docs = []
-    print("📖 Loading documents...")
-    for loader in tqdm(loaders, desc="Loading files"):
-        try:
-            docs.extend(loader.load())
-        except Exception as e:
-            print(f"⚠️  Error loading file: {e}")
-    
-    # Split documents into chunks
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=CHUNK_SIZE,
-        chunk_overlap=CHUNK_OVERLAP,
-    )
-    
-    split_docs = splitter.split_documents(docs)
-    print(f"✓  Loaded {len(split_docs)} text chunks from {len(loaders)} files.")
-    
-    return split_docs
+    for loader in loaders:
+        try: docs.extend(loader.load())
+        except Exception as e: print(f"⚠️  Erreur chargement {loader}: {e}")
+    splitter = RecursiveCharacterTextSplitter(chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP)
+    return splitter.split_documents(docs)
 
-# ─────────────────────────── 2. Construction du Vector Store ─────────────
-def get_or_build_vectorstore(documents: list) -> FAISS:
-    """Loads existing FAISS store or builds a new one."""
+def format_docs(docs):
+    return "\n\n".join(f"[Source: {doc.metadata.get('source','inconnu')}]\n{doc.page_content}" for doc in docs)
+
+def init_rag_system():
+    print("📚 Chargement des documents depuis", DOCS_DIR)
+    docs = load_documents()
     embeddings = OpenAIEmbeddings(model=EMBED_MODEL)
-    
     if Path(PERSIST_PATH).exists():
-        vectorstore = FAISS.load_local(
-            PERSIST_PATH, 
-            embeddings, 
-            allow_dangerous_deserialization=True
-        )
+        vectordb = FAISS.load_local(PERSIST_PATH, embeddings, allow_dangerous_deserialization=True)
+    elif docs:
+        vectordb = FAISS.from_documents(docs, embeddings)
+        vectordb.save_local(PERSIST_PATH)
     else:
-        vectorstore = FAISS.from_documents(documents, embeddings)
-        vectorstore.save_local(PERSIST_PATH)
-        print("✓  Vector store built and saved.")
-
-    return vectorstore
-
-# ─────────────────────────── 3. Configuration du RAG Chain ───────────────
-def setup_rag_chain(vectorstore: FAISS):
-    """Sets up the RAG chain with chat history support."""
-    
-    # Create retriever
-    retriever = vectorstore.as_retriever(
-        search_type="similarity",
-        search_kwargs={"k": TOP_K}
-    )
-    
-    # Create LLM
-    llm = ChatOpenAI(model=CHAT_MODEL, temperature=0.2)
-    
-    # ✅ Prompt pour les questions avec contexte RAG
-    rag_prompt = ChatPromptTemplate.from_messages([
-        ("system", SYSTEM_PROMPT),
-        ("placeholder", "{chat_history}"),
-        ("human", "Context:\n{context}\n\nQuestion: {question}")
-    ])
-    
-    # ✅ Prompt pour les conversations casual (sans contexte)
-    casual_prompt = ChatPromptTemplate.from_messages([
-        ("system", "You are a friendly, helpful assistant. Respond naturally to greetings and casual conversation."),
-        ("placeholder", "{chat_history}"),
-        ("human", "{question}")
-    ])
-    
-    # Helper function to format retrieved documents
-    def format_docs(docs):
-        formatted = []
-        for i, doc in enumerate(docs, 1):
-            formatted.append(f"[Doc {i}]\n{doc.page_content}")
-        return "\n\n".join(formatted)
-    
-    # Build the RAG chain
+        from langchain_core.documents import Document
+        vectordb = FAISS.from_documents([Document(page_content="RTE general info placeholder")], embeddings)
+    retriever = vectordb.as_retriever(search_type="similarity", search_kwargs={"k": TOP_K_DOCUMENTS})
+    llm = ChatOpenAI(model=CHAT_MODEL, temperature=0.3)
+    prompt = ChatPromptTemplate.from_template(SYSTEM_PROMPT_RAG)
+    # RAG chain : conversion docs -> texte se fait après récupération
     rag_chain = (
-        RunnablePassthrough.assign(
-            context=lambda x: format_docs(retriever.invoke(x["question"]))
-        )
-        | rag_prompt
+        {
+            "context": RunnablePassthrough(),
+            "question": RunnablePassthrough(),
+            "chat_history": lambda x: x.get("chat_history", "")
+        }
+        | prompt
         | llm
         | StrOutputParser()
     )
-    
-    # Build the casual chain (no retrieval)
-    casual_chain = casual_prompt | llm | StrOutputParser()
-    
-    return rag_chain, casual_chain, retriever
+    return rag_chain, retriever
 
-# ─────────────────────────── 4. Boucle de Chat ───────────────────────────
-def chat_loop(rag_chain, casual_chain, retriever):
-    """Main chat loop with RAG and history."""
+# ═════════════════════════════════════════════════════
+#                      ASSISTANT
+# ═════════════════════════════════════════════════════
+
+class SmartAssistant:
+    RAG_ROUTE = "RAG"
+    TOOL_ROUTE = "TOOL"
+    SIMPLE_ROUTE = "SIMPLE"
     
-    # Initialize chat history
-    chat_history = InMemoryChatMessageHistory()
+    def __init__(self, rag_chain, retriever):
+        self.rag_chain = rag_chain
+        self.retriever = retriever
+        self.llm = ChatOpenAI(model=CHAT_MODEL, temperature=0.5)
+        self.llm_conversational = ChatOpenAI(model=CHAT_MODEL, temperature=0.7)
+        self.chat_history = InMemoryChatMessageHistory()
+        # Outils
+        self.tools = [
+            Tool(name="calculator", description="Calculatrice", func=calculatrice),
+            creer_outil_rte(),
+            creer_outil_web_search()
+        ]
+        from langchain.agents import initialize_agent, AgentType
+        self.agent_executor = initialize_agent(
+            tools=self.tools,
+            llm=self.llm,
+            agent=AgentType.OPENAI_FUNCTIONS,
+            verbose=True,
+            handle_parsing_errors=True,
+            max_iterations=5
+        )
     
-    print("\n" + "="*60)
-    print("        🤖 RAG Chat System Ready (LangChain Edition)")
-    print("="*60)
-    print("Type your questions below. Press Ctrl-C to quit.\n")
+    def determine_route(self, query: str) -> str:
+        q = query.lower()
+        if any(re.search(p, q) for p in [r'\b(bonjour|salut|hello|hi|hey)\b', r'\b(comment ça va|ça va|ca va)\b', r'\b(merci|thanks|au revoir|bye)\b', r'\b(oui|non|ok|d\'accord)\b']):
+            return self.SIMPLE_ROUTE
+        if any(k in q for k in ['calcul','+','-','*','/','fois','divisé','météo','meteo','température','actualité','news','heure','prix spot','cee','tempo','jour tempo']):
+            return self.TOOL_ROUTE
+        if any(k in q for k in ['rte','réseau','reseau','transport','règle','regle','service','système','systeme','fréquence','ajustement','mécanisme','mecanisme','ma','nebef','effacement','marché','marche','contribution','valorisation']):
+            return self.RAG_ROUTE
+        return self.RAG_ROUTE
     
-    while True:
+    def format_chat_history(self) -> str:
+        msgs = self.chat_history.messages[-6:]
+        return "\n".join(f"Utilisateur: {m.content}" if isinstance(m, HumanMessage) else f"Assistant: {m.content}" for m in msgs)
+    
+    async def process(self, user_input: str) -> Dict[str, Any]:
+        route = self.determine_route(user_input)
+        print(f"🚦 Route: {route}")
         try:
-            question = input("\n💬 You: ")
-            if not question.strip():
-                continue
-        except KeyboardInterrupt:
-            print("\n\n👋 Bye!")
-            break
-        
-        # ✅ Détection du type de question
-        is_casual = is_greeting_or_casual(question)
-        
-        # Prepare input with chat history
-        input_data = {
-            "question": question,
-            "chat_history": chat_history.messages
-        }
-        
-        # Get answer from appropriate chain
-        try:
-            if is_casual:
-                # ✅ Utiliser la chaîne casual (pas de RAG)
-                print("\n💭 (Casual conversation mode)")
-                answer = casual_chain.invoke(input_data)
-            else:
-                # ✅ Utiliser la chaîne RAG (avec retrieval)
-                retrieved_docs = retriever.invoke(question)
-                
-                # Show retrieved context
-                print("\n🔍 Retrieved context:")
-                print("─" * 60)
-                for i, doc in enumerate(retrieved_docs, 1):
-                    print(textwrap.indent(
-                        textwrap.fill(doc.page_content, width=88), 
-                        f"[Doc {i}] "
-                    ))
-                print("─" * 60)
-                
-                answer = rag_chain.invoke(input_data)
-                
+            if route == self.SIMPLE_ROUTE:
+                r = await self.llm_conversational.ainvoke(user_input)
+                answer = getattr(r, "content", str(r))
+                sources = []
+            elif route == self.RAG_ROUTE:
+                docs = await self.retriever.ainvoke(user_input)  # Récupère les Document
+                docs_text = format_docs(docs)
+                answer = await self.rag_chain.ainvoke({
+                    "question": user_input,
+                    "context": docs_text,
+                    "chat_history": self.format_chat_history()
+                })
+                sources = list({Path(doc.metadata.get('source','inconnu')).name for doc in docs})
+            else:  # TOOL_ROUTE
+                r = await self.agent_executor.ainvoke({"input": user_input})
+                answer = r["output"]
+                sources = []
+            self.chat_history.add_user_message(user_input)
+            self.chat_history.add_ai_message(answer)
+            return {"answer": answer, "route": route, "sources": sources, "timestamp": datetime.now().isoformat()}
         except Exception as e:
-            answer = f"An error occurred while calling the model: {e}"
-        
-        # Display answer
-        print("\n🤖 Assistant:\n")
-        print(textwrap.fill(answer, width=88))
-        
-        # Update chat history
-        chat_history.add_user_message(question)
-        chat_history.add_ai_message(answer)
+            return {"answer": f"❌ Erreur ({route}): {e}", "route": route, "sources": [], "timestamp": datetime.now().isoformat()}
 
-# ─────────────────────────── Main ────────────────────────────────────────
-if __name__ == "__main__":
+# ═════════════════════════════════════════════════════
+#                          BOUCLE PRINCIPALE
+# ═════════════════════════════════════════════════════
+
+async def main():
+    if not os.getenv("OPENAI_API_KEY"):
+        raise SystemExit("❌ OPENAI_API_KEY non définie dans .env")
+    print("\n" + "="*70)
+    print("🤖  ASSISTANT RTE INTELLIGENT (LCEL)")
+    print("="*70)
+    rag_chain, retriever = init_rag_system()
+    assistant = SmartAssistant(rag_chain, retriever)
     try:
-        # 1. Load and split documents
-        documents = load_and_split_documents()
-        
-        # 2. Get or build vector store
-        vectorstore = get_or_build_vectorstore(documents)
-        
-        # 3. Setup RAG chain
-        rag_chain, casual_chain, retriever = setup_rag_chain(vectorstore)
-        
-        # 4. Start chat loop
-        chat_loop(rag_chain, casual_chain, retriever)
-        
-    except RuntimeError as e:
-        print(f"\n❌ FATAL ERROR: {e}")
-    except AssertionError as e:
-        print(f"\n❌ FATAL ERROR: {e}")
+        while True:
+            user_input = input("\n💬  Vous: ").strip()
+            if not user_input: continue
+            if user_input.lower() in ['quit','exit','bye']:
+                print("\n👋 Au revoir!")
+                break
+            print("\n🤖  Assistant:")
+            print("-"*70)
+            result = await assistant.process(user_input)
+            print(textwrap.fill(result["answer"], width=88))
+            if result["sources"]: print(f"\n📄 Sources: {', '.join(result['sources'])}")
+            print("-"*70)
+    except KeyboardInterrupt:
+        print("\n👋 Au revoir!")
     except Exception as e:
-        print(f"\n❌ An unexpected error occurred: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"\n❌ Erreur fatale: {e}")
+
+if __name__ == "__main__":
+    import asyncio
+    asyncio.run(main())
