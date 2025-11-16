@@ -1,0 +1,14 @@
+# Environnements et secrets
+.env
+__pycache__/
+*.pyc
+
+# Dossiers spécifiques
+faiss_store/
+.chainlit/
+
+# Jupyter
+*.ipynb_checkpoints/
+
+# IDE
+.vscode/
