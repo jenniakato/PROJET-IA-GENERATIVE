@@ -102,7 +102,7 @@ def calculatrice(expression: str) -> str:
     try:
         expression = expression.strip().replace(',', '.')
         if not re.match(r'^[\d\s\+\-\*\/\(\)\.]+$', expression):
-            return "❌ Expression invalide.Veuillez utiliser uniquement des nombres et des opérateurs (+, -, *, /, ())."
+            return "❌ Expression invalide. Utilisez uniquement +, -, *, /, (), nombres."
         
         resultat = eval(expression, {"__builtins__": {}}, {})
         return f"✓ Résultat: {resultat}"

@@ -43,44 +43,9 @@ async def start():
         # Message de bienvenue final
         welcome_msg = f"""# 🤖 Assistant RTE Intelligent
 
-Bienvenue ! Je suis votre assistant spécialisé dans les **règles et systèmes RTE**.
-
-## 📚 Mes capacités :
-
-### 📄 Documents RTE (PRIORITÉ)
-Recherche dans vos documents RTE : règles, services système, mécanisme d'ajustement, marchés...
-- *Exemple : "Qu'est-ce que le mécanisme d'ajustement ?"*
-- *Exemple : "Comment fonctionne NEBEF ?"*
-- *Exemple : "Règles de contribution au RPT ?"*
-
-### 🔢 Calculatrice
-Calculs mathématiques précis
-- *Exemple : "Calcule 1234 × 56"*
-
-### 🌐 Recherche web
-Informations externes en temps réel : météo, actualités
-- *Exemple : "Quelle est la météo à Paris ?"*
-
-### ⚡ Calendrier Tempo
-Jours tarifaires Tempo EDF : Rouge, Blanc, Bleu
-- *Exemple : "Quel est le jour Tempo aujourd'hui ?"*
-
-### 💬 Conversation
-Discussion naturelle et conviviale
-- *Exemple : "Bonjour !"*
-
----
-
-## ⚙️ Configuration actuelle :
-- 📁 Documents RTE : `{DOCS_DIR.name}/`
-- 🔍 Récupération : Top {TOP_K_DOCUMENTS} documents
-- 🧠 Modèle : {CHAT_MODEL}
-
----
-
-**Posez-moi votre question sur RTE ci-dessous !** 👇
+**Bienvenue ! Je suis votre assistant spécialisé**.
+**En quoi puis-je vous être utilise!** 
 """
-        
         # Mise à jour du message avec le contenu final
         msg.content = welcome_msg
         await msg.update()
@@ -96,11 +61,10 @@ Discussion naturelle et conviviale
 3. Vérifiez que tous les modules sont installés : `pip install -r requirements_chainlit.txt`
 4. Si le problème persiste, supprimez le dossier `faiss_store/` et relancez
 
-**Besoin d'aide ?** Consultez `README_CHAINLIT.md`
+**Besoin d'aide ?** Faite appelle à l'administrateur`
 """
         msg.content = error_msg
         await msg.update()
-
 
 @cl.on_message
 async def main(message: cl.Message):
@@ -243,8 +207,7 @@ async def on_refresh_docs(action: cl.Action):
             content=f"❌ **Erreur lors du rafraîchissement** : {str(e)}"
         ).send()
 
-
-# Note : Pour activer cette action, ajoutez un bouton dans un message :
+# récativer plus atrd 
 # actions = [cl.Action(name="refresh_docs", value="refresh", label="🔄 Rafraîchir les documents")]
 # await cl.Message(content="...", actions=actions).send()
 
@@ -254,15 +217,6 @@ async def on_refresh_docs(action: cl.Action):
 # ═══════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
-    # Pour lancer l'application :
-    # chainlit run app.py
-    
-    # Ou avec watch mode (rechargement auto) :
-    # chainlit run app.py -w
-    
-    # Ou avec host et port personnalisés :
-    # chainlit run app.py --host 0.0.0.0 --port 8080
-    
     print("Pour lancer l'application Chainlit :")
     print("  chainlit run app.py")
     print("\nOu utilisez le script de démarrage :")
